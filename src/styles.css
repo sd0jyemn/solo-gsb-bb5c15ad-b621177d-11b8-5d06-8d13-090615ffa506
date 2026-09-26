@@ -496,6 +496,21 @@ button.mini.danger:hover { color: var(--error); border-color: var(--error); }
 }
 .merge-empty { padding: 4px 0; }
 
+/* ---------- Excerpt export ---------- */
+.excerpt-panel .row { margin-bottom: 8px; }
+.excerpt-label { min-width: 56px; color: var(--muted); font-size: 12.5px; }
+.excerpt-list { max-height: 260px; overflow-y: auto; }
+.excerpt-clip-tag {
+  font-size: 10px;
+  color: var(--warn);
+  background: rgba(255, 182, 72, .14);
+  border: 1px solid rgba(255, 182, 72, .45);
+  border-radius: 4px;
+  padding: 0 5px;
+}
+.excerpt-orig { margin-bottom: 3px; }
+.excerpt-body { font-size: 12.5px; }
+
 /* ---------- Inspector ---------- */
 .inspector .row { margin-bottom: 10px; }
 .chk { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }

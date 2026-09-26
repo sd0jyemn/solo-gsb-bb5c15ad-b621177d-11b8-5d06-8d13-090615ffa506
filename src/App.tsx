@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Conflict, Cue, Settings } from './lib/types';
-import { parseVTT, serializeVTT } from './lib/vtt';
+import { parseVTT } from './lib/vtt';
+import { downloadVTT, timestampedFilename } from './lib/download';
 import { detectIssues } from './lib/issues';
 import { uid } from './lib/time';
 import { SAMPLE_VTT } from './lib/sample';
@@ -13,6 +14,7 @@ import ImportModal from './components/ImportModal';
 import LayoutPreview from './components/LayoutPreview';
 import SyncPanel from './components/SyncPanel';
 import MergePanel from './components/MergePanel';
+import ExcerptPanel from './components/ExcerptPanel';
 
 export default function App() {
   const initial = useMemo(() => parseVTT(SAMPLE_VTT), []);
@@ -113,13 +115,25 @@ export default function App() {
     } else {
       setToast('已导出 WebVTT 文件。');
     }
-    const blob = new Blob([serializeVTT(cues, preamble)], { type: 'text/vtt;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `subtitles-fixed-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.vtt`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadVTT(cues, preamble, timestampedFilename('subtitles-fixed'));
+  }
+
+  function exportExcerpt(planCues: { id: string; start: number; end: number; text: string }[]) {
+    // 摘录为独立文件：复用现有序列化与浏览器下载；标识符/设置取自当前 cue，
+    // 时间与（已改写时间戳标签的）文本取自裁剪计划，文件头原样保留。
+    if (planCues.length === 0) {
+      setToast('摘录区间内没有可导出的片段。');
+      return;
+    }
+    const byId = new Map(planCues.map((c) => [c.id, c]));
+    const excerptCues: Cue[] = cues
+      .filter((c) => byId.has(c.id))
+      .map((c) => {
+        const p = byId.get(c.id)!;
+        return { ...c, start: p.start, end: p.end, text: p.text, locked: false };
+      });
+    downloadVTT(excerptCues, preamble, timestampedFilename('subtitles-excerpt'));
+    setToast(`已导出摘录 WebVTT 文件（${planCues.length} 条），当前编辑内容未改动。`);
   }
 
   const selected = cues.find((c) => c.id === selectedId) ?? null;
@@ -132,7 +146,7 @@ export default function App() {
           <span className="logo">🎞️</span>
           <div>
             <h1>WebVTT 字幕时序修复器</h1>
-            <span className="muted small">本地运行 · 拖动传播 · 锁定保护 · 布局预览 · 两点同步 · 双语合并</span>
+            <span className="muted small">本地运行 · 拖动传播 · 锁定保护 · 布局预览 · 两点同步 · 双语合并 · 摘录导出</span>
           </div>
         </div>
         <div className="header-actions">
@@ -208,6 +222,14 @@ export default function App() {
           <MergePanel
             cues={sortedCues}
             onApply={applyMerge}
+            onJump={(id) => {
+              setSelectedId(id);
+              scrollToRef.current(id);
+            }}
+          />
+          <ExcerptPanel
+            cues={sortedCues}
+            onDownload={exportExcerpt}
             onJump={(id) => {
               setSelectedId(id);
               scrollToRef.current(id);

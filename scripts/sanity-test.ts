@@ -4,6 +4,7 @@ import { parseVTT, serializeVTT } from '../src/lib/vtt';
 import { applyDrag } from '../src/lib/solver';
 import { planTwoPointSync } from '../src/lib/sync';
 import { planMerge, joinBilingualText } from '../src/lib/merge';
+import { planExcerpt, rewriteTimestampTags } from '../src/lib/excerpt';
 import { detectIssues } from '../src/lib/issues';
 import {
   parseCueSettings,
@@ -590,6 +591,137 @@ function mks(spec: MCue[]): Cue[] {
   // 未配对副轨不出现在写入结果中（无任何主轨文本包含它）
   assert.ok(!applied.some((c) => c.text.includes('未写入')));
   ok('双语合并：输入不变；确认仅追加文本行，时间/标识符/设置/锁定保留');
+}
+
+// ---------- 片段摘录导出 ----------
+
+// 32. 正时长交集纳入并统一减去摘录起点；仅端点相接排除；时间范围无效报错
+{
+  const cs = mk([
+    { id: 'a', s: 0, e: 2 },     // 左邻
+    { id: 'b', s: 2, e: 5 },     // 与 a 仅端点相接；与区间在 5 处相接
+    { id: 'c', s: 5, e: 8 },
+    { id: 'd', s: 10, e: 12 },   // 区间外
+  ]);
+  const plan = planExcerpt(cs, 2, 5);
+  assert.strictEqual(plan.error, null);
+  assert.deepStrictEqual(plan.cues.map((c) => c.id), ['b']);
+  assert.strictEqual(plan.cues[0].start, 0);
+  assert.strictEqual(plan.cues[0].end, 3);
+  // b 在 [2,5] 与区间完全重合；a 在 2 处仅端点相接、c 在 5 处仅端点相接，均不纳入
+  assert.strictEqual(plan.cues.some((c) => c.id === 'a' || c.id === 'c'), false);
+
+  // 结束不晚于开始 => 无效
+  const bad1 = planExcerpt(cs, 5, 5);
+  assert.ok(bad1.error && bad1.cues.length === 0);
+  const bad2 = planExcerpt(cs, 6, 4);
+  assert.ok(bad2.error);
+  const bad3 = planExcerpt(cs, -1, 4);
+  assert.ok(bad3.error);
+
+  // 区间有效但无正时长交集
+  const none = planExcerpt(cs, 8, 10);
+  assert.strictEqual(none.error, null);
+  assert.strictEqual(none.cues.length, 0); // c 在 8 处相接、d 在 10 处相接
+  ok('摘录：左闭右开正时长交集，端点相接排除；无效/无命中');
+}
+
+// 33. cue 起止被裁到交集后再偏移（左右裁剪）
+{
+  const cs: Cue[] = [
+    { id: 'a', identifier: '', start: 0, end: 10, text: 'A', settings: '', locked: false },
+    { id: 'b', identifier: '', start: 3, end: 4, text: 'B', settings: '', locked: false },
+  ];
+  const plan = planExcerpt(cs, 3, 7);
+  assert.strictEqual(plan.cues.length, 2);
+  // a 裁到 [3,7]，偏移后 [0,4]
+  const a = plan.cues[0];
+  assert.ok(Math.abs(a.start - 0) < 1e-9 && Math.abs(a.end - 4) < 1e-9);
+  assert.deepStrictEqual([a.origStart, a.origEnd], [0, 10]);
+  // b 完全在区间内：[3,4] -> [0,1]
+  const b = plan.cues[1];
+  assert.ok(Math.abs(b.start - 0) < 1e-9 && Math.abs(b.end - 1) < 1e-9);
+
+  // 起点非零的偏移
+  const plan2 = planExcerpt(cs, 5, 7);
+  assert.strictEqual(plan2.cues.length, 1);
+  const a2 = plan2.cues[0];
+  assert.deepStrictEqual([a2.start, a2.end], [0, 2]);
+  ok('摘录：cue 起止裁到交集并统一减去摘录起点');
+}
+
+// 34. 时间戳标签：仅保留落在裁剪后 cue 内部的标签并按同一偏移改写；
+//     恰好落在裁剪右端点的标签随左闭右开被删除；普通内联标签/文字保留
+{
+  const text = '<00:01.000><b>早</b><00:03.000>中间<00:05.000><i>晚</i><00:09.000>尾';
+  // cue 原始 [0,10]，摘录 [2,8] => cue 裁到 [2,8]，偏移 -2 => [0,6]
+  const out = rewriteTimestampTags(text, 2, 8, 2);
+  // 1.000 < 2 删除；3.000 -> 00:01.000；5.000 -> 00:03.000；9.000 > 8 删除
+  assert.strictEqual(out, '<b>早</b><00:01.000>中间<00:03.000><i>晚</i>尾');
+
+  // 标签恰好落在右端点 8.000：左闭右开，不保留
+  const edge = rewriteTimestampTags('<00:08.000>x', 2, 8, 2);
+  assert.strictEqual(edge, 'x');
+  // 标签恰好落在左端点 2.000：保留并归零
+  const edgeL = rewriteTimestampTags('<00:02.000>x', 2, 8, 2);
+  assert.strictEqual(edgeL, '<00:00.000>x');
+
+  // 非时间戳的尖括号内容原样保留（<00:00> 缺毫秒、<v Bob> 等）
+  const weird = rewriteTimestampTags('<00:00><v Bob>你好</v>', 0, 8, 0);
+  assert.strictEqual(weird, '<00:00><v Bob>你好</v>');
+  ok('摘录：时间戳标签按左闭右开裁剪并偏移改写，其余内联标签保留');
+}
+
+// 35. 端到端：摘录结果可直接序列化，标识符/设置/文件头原样保留，时间码归零
+{
+  const vtt = `WEBVTT
+
+NOTE 保留头
+
+cid-7
+00:04.000 --> 00:12.000 line:90% align:middle
+<00:05.000>你好<00:09.500>世界
+
+00:20.000 --> 00:22.000
+区间外
+`;
+  const p = parseVTT(vtt);
+  assert.ok(!p.error, p.error);
+  const plan = planExcerpt(p.cues, 6, 10);
+  assert.strictEqual(plan.cues.length, 1);
+  const c = plan.cues[0];
+  assert.deepStrictEqual([c.start, c.end], [0, 4]);
+  // 5.000 在裁剪左端点之前被删；9.500 -> 3.500
+  assert.strictEqual(c.text, '你好<00:03.500>世界');
+  const src = p.cues.find((x) => x.id === c.id)!;
+  const out = serializeVTT(
+    [{ ...src, start: c.start, end: c.end, text: c.text }],
+    p.preamble,
+  );
+  assert.ok(out.includes('NOTE 保留头'));
+  assert.ok(out.includes('cid-7'));
+  assert.ok(out.includes('00:00.000 --> 00:04.000 line:90% align:middle'));
+  assert.ok(out.includes('你好<00:03.500>世界'));
+  assert.ok(!out.includes('区间外'));
+  const reparsed = parseVTT(out);
+  assert.ok(!reparsed.error, reparsed.error);
+  assert.strictEqual(reparsed.cues.length, 1);
+  ok('摘录：序列化保留文件头/标识符/设置，时间码归零，区间外 cue 不写入');
+}
+
+// 36. 摘录不修改输入 cue（当前编辑内容不变）
+{
+  const cs: Cue[] = [
+    { id: 'a', identifier: 'id-a', start: 0, end: 10, text: '<00:01.000>x', settings: 'line:50%', locked: true },
+  ];
+  const snapshot = JSON.parse(JSON.stringify(cs));
+  const plan = planExcerpt(cs, 2, 8);
+  assert.deepStrictEqual(cs, snapshot);
+  assert.strictEqual(plan.cues[0].text, 'x');
+  assert.strictEqual(cs[0].text, '<00:01.000>x');
+  assert.strictEqual(cs[0].start, 0);
+  assert.strictEqual(cs[0].locked, true);
+  ok('摘录：输入 cue 与文本不被修改');
 }
 
 console.log(`\n全部 ${passed} 组测试通过 ✅`);
