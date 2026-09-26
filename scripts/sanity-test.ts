@@ -4,6 +4,7 @@ import { parseVTT, serializeVTT } from '../src/lib/vtt';
 import { applyDrag } from '../src/lib/solver';
 import { planTwoPointSync } from '../src/lib/sync';
 import { planMerge, joinBilingualText } from '../src/lib/merge';
+import { planExcerpt, shiftTimestampTags } from '../src/lib/excerpt';
 import { detectIssues } from '../src/lib/issues';
 import {
   parseCueSettings,
@@ -590,6 +591,154 @@ function mks(spec: MCue[]): Cue[] {
   // 未配对副轨不出现在写入结果中（无任何主轨文本包含它）
   assert.ok(!applied.some((c) => c.text.includes('未写入')));
   ok('双语合并：输入不变；确认仅追加文本行，时间/标识符/设置/锁定保留');
+}
+
+// ---------- 片段摘录导出 ----------
+
+// 32. 基本命中：起止裁到交集后统一减去摘录起点；仅端点相接不纳入
+{
+  const cs = mk([{ id: 'a', s: 0, e: 2 }, { id: 'b', s: 2, e: 4 }, { id: 'c', s: 4.5, e: 6 }, { id: 'd', s: 6, e: 8 }]);
+  const plan = planExcerpt(cs, 2, 5);
+  assert.strictEqual(plan.error, null);
+  assert.strictEqual(plan.hits.length, 2);
+  // a [0,2] 与区间 [2,5) 仅端点相接 => 不纳入；d [6,8] 无交集 => 不纳入
+  assert.deepStrictEqual(plan.hits.map((h) => h.cue.id), ['b', 'c']);
+  // 命中序号为按时间排序后的原序号
+  assert.deepStrictEqual(plan.hits.map((h) => h.index), [1, 2]);
+  // b 完整落入区间：[2,4] -> [0,2]
+  assert.ok(Math.abs(plan.hits[0].cue.start - 0) < 1e-6);
+  assert.ok(Math.abs(plan.hits[0].cue.end - 2) < 1e-6);
+  assert.deepStrictEqual([plan.hits[0].clipStart, plan.hits[0].clipEnd], [2, 4]);
+  // c 被终点裁剪：[4.5,6] ∩ [2,5) = [4.5,5) -> [2.5,3)
+  assert.ok(Math.abs(plan.hits[1].cue.start - 2.5) < 1e-6);
+  assert.ok(Math.abs(plan.hits[1].cue.end - 3) < 1e-6);
+  assert.deepStrictEqual([plan.hits[1].clipStart, plan.hits[1].clipEnd], [4.5, 5]);
+  ok('片段摘录：起止裁到交集并统一减去摘录起点，端点相接不纳入');
+}
+
+// 33. 左闭右开边界：起点处相接的纳入、终点处相接的不纳入
+{
+  const cs = mk([
+    { id: 'before', s: 0, e: 2 },  // end == 起点 => 不纳入
+    { id: 'atStart', s: 2, e: 3 }, // start == 起点 => 纳入，从 0 起算
+    { id: 'atEnd', s: 3, e: 4 },   // end == 终点 => 完整纳入
+    { id: 'after', s: 4, e: 6 },   // start == 终点 => 不纳入
+  ]);
+  const plan = planExcerpt(cs, 2, 4);
+  assert.strictEqual(plan.error, null);
+  assert.deepStrictEqual(plan.hits.map((h) => h.cue.id), ['atStart', 'atEnd']);
+  assert.ok(Math.abs(plan.hits[0].cue.start - 0) < 1e-6);
+  assert.ok(Math.abs(plan.hits[1].cue.end - 2) < 1e-6);
+  ok('片段摘录：左闭右开区间边界行为正确');
+}
+
+// 34. 时间戳标签：仅保留落在裁剪后 cue 内部的标签并按同一偏移改写，普通标签原样保留
+{
+  // cue [10,20]，摘录 [10,20)：clipStart=10, clipEnd=20, offset=10
+  const text = '<b><00:10.000>甲<00:15.000>乙</b><00:20.000>丙';
+  const out = shiftTimestampTags(text, 10, 20, 10);
+  // 10.000 落在左端点（含）=> 改写为 00:00.000；15.000 => 00:05.000；
+  // 20.000 恰好落在右端点（不含）=> 移除；<b>/</b> 与文字原样保留
+  assert.strictEqual(out, '<b><00:00.000>甲<00:05.000>乙</b>丙');
+
+  // 区间外的标签移除，区间内的按偏移改写；普通内联标签（含语音标签）不动
+  const t2 = '<00:01.000>Hello <v Tom><00:02.000>W<i>or</i>ld</v>';
+  assert.strictEqual(shiftTimestampTags(t2, 1.5, 3, 1.5), 'Hello <v Tom><00:00.500>W<i>or</i>ld</v>');
+
+  // 经 planExcerpt 端到端：文本中的标签随裁剪区间过滤与平移
+  const cs: Cue[] = [{
+    id: 'k', identifier: '', start: 0, end: 3,
+    text: '<00:01.000>Hello <00:02.000>World', settings: '', locked: false,
+  }];
+  const plan = planExcerpt(cs, 1.5, 3);
+  assert.strictEqual(plan.error, null);
+  assert.strictEqual(plan.hits[0].cue.text, 'Hello <00:00.500>World');
+  ok('片段摘录：时间戳标签按裁剪区间过滤并按同一偏移改写');
+}
+
+// 35. 标识符/设置/锁定/文件头原样保留；导出的独立 WebVTT 可重新解析且从 0 起算
+{
+  const v = `WEBVTT
+
+NOTE 摘录也要保留我
+
+cue-1
+00:10.000 --> 00:12.000 line:90% align:middle
+第一行
+<i>第二行</i>
+
+cue-2
+00:12.000 --> 00:14.000
+后一段
+`;
+  const p = parseVTT(v);
+  assert.ok(!p.error, p.error);
+  p.cues[1].locked = true;
+  const plan = planExcerpt(p.cues, 11, 14);
+  assert.strictEqual(plan.error, null);
+  assert.strictEqual(plan.hits.length, 2);
+  // 标识符、设置、锁定状态原样保留
+  assert.strictEqual(plan.hits[0].cue.identifier, 'cue-1');
+  assert.strictEqual(plan.hits[0].cue.settings, 'line:90% align:middle');
+  assert.strictEqual(plan.hits[1].cue.identifier, 'cue-2');
+  assert.strictEqual(plan.hits[1].cue.locked, true);
+  // 文本（含内联标签与多行）原样保留
+  assert.strictEqual(plan.hits[0].cue.text, '第一行\n<i>第二行</i>');
+  // 复用现有序列化：文件头原样写回，时间码从 0 起算
+  const out = serializeVTT(plan.hits.map((h) => h.cue), p.preamble);
+  assert.ok(out.startsWith('WEBVTT\n'));
+  assert.ok(out.includes('NOTE 摘录也要保留我'));
+  assert.ok(out.includes('cue-1'));
+  assert.ok(out.includes('line:90% align:middle'));
+  assert.ok(out.includes('00:00.000 --> 00:01.000')); // [10,12] ∩ [11,14) = [11,12) -> [0,1)
+  assert.ok(out.includes('00:01.000 --> 00:03.000')); // cue-2 完整落入 -> [1,3)
+  const re = parseVTT(out);
+  assert.ok(!re.error, re.error);
+  assert.strictEqual(re.cues.length, 2);
+  assert.strictEqual(re.cues[0].start, 0);
+  assert.strictEqual(re.cues[1].end, 3);
+  ok('片段摘录：标识符/设置/锁定/文件头保留，导出可重解析且从 0 起算');
+}
+
+// 36. 无命中或时间范围无效时给出原因并禁止下载（error 非空且无命中）
+{
+  const cs = mk([{ id: 'a', s: 0, e: 2 }, { id: 'b', s: 3, e: 5 }]);
+  // 终点等于起点 / 终点早于起点
+  const eq = planExcerpt(cs, 3, 3);
+  assert.ok(eq.error !== null && eq.error.includes('无效'));
+  assert.strictEqual(eq.hits.length, 0);
+  const rev = planExcerpt(cs, 6, 5);
+  assert.ok(rev.error !== null && rev.error.includes('无效'));
+  // 未输入起止时间
+  const none = planExcerpt(cs, null, 5);
+  assert.ok(none.error !== null && none.error.includes('输入'));
+  // 负起点
+  const neg = planExcerpt(cs, -1, 2);
+  assert.ok(neg.error !== null && neg.error.includes('无效'));
+  // 区间无命中（含仅端点相接的情形）
+  const miss = planExcerpt(cs, 100, 200);
+  assert.ok(miss.error !== null && miss.error.includes('没有命中'));
+  assert.strictEqual(miss.hits.length, 0);
+  const touch = planExcerpt(cs, 2, 3); // 与 a、b 均仅端点相接
+  assert.ok(touch.error !== null && touch.error.includes('没有命中'));
+  // 空字幕
+  const empty = planExcerpt([], 0, 1);
+  assert.ok(empty.error !== null);
+  ok('片段摘录：无效范围与无命中均给出原因并禁止下载');
+}
+
+// 37. 输入不被修改（编辑器数据保持不变的语义依赖快照）
+{
+  const cs = mk([{ id: 'a', s: 0, e: 2 }, { id: 'b', s: 3, e: 5 }]);
+  cs[0].text = '<00:01.000>你好';
+  const snapshot = JSON.parse(JSON.stringify(cs));
+  const plan = planExcerpt(cs, 1, 4);
+  assert.strictEqual(plan.error, null);
+  assert.deepStrictEqual(cs, snapshot);
+  // 命中 cue 是新对象，改写文本不影响原 cue
+  assert.strictEqual(cs[0].text, '<00:01.000>你好');
+  assert.strictEqual(plan.hits[0].cue.text, '<00:00.000>你好');
+  ok('片段摘录：输入数组与原 cue 不被修改');
 }
 
 console.log(`\n全部 ${passed} 组测试通过 ✅`);

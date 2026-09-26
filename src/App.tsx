@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Conflict, Cue, Settings } from './lib/types';
 import { parseVTT, serializeVTT } from './lib/vtt';
+import { downloadTextFile } from './lib/download';
 import { detectIssues } from './lib/issues';
 import { uid } from './lib/time';
 import { SAMPLE_VTT } from './lib/sample';
@@ -13,6 +14,7 @@ import ImportModal from './components/ImportModal';
 import LayoutPreview from './components/LayoutPreview';
 import SyncPanel from './components/SyncPanel';
 import MergePanel from './components/MergePanel';
+import ExcerptPanel from './components/ExcerptPanel';
 
 export default function App() {
   const initial = useMemo(() => parseVTT(SAMPLE_VTT), []);
@@ -113,13 +115,8 @@ export default function App() {
     } else {
       setToast('已导出 WebVTT 文件。');
     }
-    const blob = new Blob([serializeVTT(cues, preamble)], { type: 'text/vtt;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `subtitles-fixed-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.vtt`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    downloadTextFile(`subtitles-fixed-${stamp}.vtt`, serializeVTT(cues, preamble));
   }
 
   const selected = cues.find((c) => c.id === selectedId) ?? null;
@@ -132,7 +129,7 @@ export default function App() {
           <span className="logo">🎞️</span>
           <div>
             <h1>WebVTT 字幕时序修复器</h1>
-            <span className="muted small">本地运行 · 拖动传播 · 锁定保护 · 布局预览 · 两点同步 · 双语合并</span>
+            <span className="muted small">本地运行 · 拖动传播 · 锁定保护 · 布局预览 · 两点同步 · 双语合并 · 片段摘录</span>
           </div>
         </div>
         <div className="header-actions">
@@ -213,6 +210,7 @@ export default function App() {
               scrollToRef.current(id);
             }}
           />
+          <ExcerptPanel cues={sortedCues} preamble={preamble} onToast={setToast} />
           <LayoutPreview cue={selected} />
           <Inspector
             cue={selected}
